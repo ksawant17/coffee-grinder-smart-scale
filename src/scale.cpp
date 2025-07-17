@@ -1,161 +1,181 @@
 #include "scale.hpp"
-#include <MathBuffer.h>
-
-
-HX711 loadcell;
-SimpleKalmanFilter kalmanFilter(0.2, 0.2, 0.05);
-
+#include <Arduino.h>
 
 #define ABS(a) (((a) > 0) ? (a) : ((a) * -1))
 
-TaskHandle_t ScaleTask;
-TaskHandle_t ScaleStatusTask;
-
-double scaleWeight = 0;
-unsigned long scaleLastUpdatedAt = 0;
-unsigned long lastSignificantWeightChangeAt = 0;
-unsigned long lastTareAt = 0; // if 0, should tare load cell, else represent when it was last tared
-bool scaleReady = false;
-int scaleStatus = STATUS_EMPTY;
-double cupWeightEmpty = 0;
-unsigned long startedGrindingAt = 0;
-unsigned long finishedGrindingAt = 0;
-MathBuffer<double, 100> weightHistory;
-
-
-void tareScale() {
-  Serial.println("Taring scale");
-  loadcell.tare(TARE_MEASURES);
-  lastTareAt = millis();
-}
-
-void updateScale( void * parameter) {
-  float lastEstimate;
-
-
-  for (;;) {
-    if (lastTareAt == 0) {
-      tareScale();
-    }
+// ESP32-C3 specific optimization - use IRAM for critical functions
+void IRAM_ATTR Scale::update() {
     if (loadcell.wait_ready_timeout(300)) {
-      lastEstimate = kalmanFilter.updateEstimate(loadcell.get_units());
-      scaleWeight = lastEstimate;
-      scaleLastUpdatedAt = millis();
-      weightHistory.push(scaleWeight);
-      scaleReady = true;
+        // Update weight with Kalman filter
+        state.currentWeight = kalmanFilter.updateEstimate(loadcell.get_units());
+        state.lastUpdateTime = millis();
+        state.isReady = true;
+        
+        // Check for significant weight changes
+        if (ABS(state.currentWeight - state.cupEmptyWeight) > config.significantWeightChange) {
+            state.lastSignificantChange = millis();
+        }
+        
+        // Store in history buffer
+        weightHistory.push(state.currentWeight);
+        
+        updateStatus();
     } else {
-      Serial.println("HX711 not found.");
-      scaleReady = false;
+        state.isReady = false;
+        handleGrindingFailure("Scale communication error");
     }
-  }
 }
 
-void scaleStatusLoop(void *p) {
-  double tenSecAvg;
-  for (;;) {
-    tenSecAvg = weightHistory.averageSince((int64_t)millis() - 10000);
-    // Serial.printf("Avg: %f, currentWeight: %f\n", tenSecAvg, scaleWeight);
+void Scale::begin(const PinConfig& pins, const ScaleConfig& config) {
+    this->pins = pins;
+    this->config = config;
+    
+    // Initialize load cell with higher gain for ESP32-C3
+    loadcell.begin(pins.loadcellDout, pins.loadcellSck);
+    loadcell.set_scale(config.loadcellScaleFactor);
+    loadcell.set_gain(128); // Higher gain for better resolution
+    
+    // Configure grinder pin with ESP32 specific settings
+    pinMode(pins.grinderActive, OUTPUT);
+    digitalWrite(pins.grinderActive, LOW);
+    
+    // Initialize state
+    state = {
+        .currentWeight = 0,
+        .cupEmptyWeight = 0,
+        .lastUpdateTime = 0,
+        .lastSignificantChange = 0,
+        .lastTareTime = 0,
+        .grindStartTime = 0,
+        .grindEndTime = 0,
+        .isReady = false,
+        .status = ScaleStatus::EMPTY
+    };
 
-    if (ABS(tenSecAvg - scaleWeight) > SIGNIFICANT_WEIGHT_CHANGE) {
-      // Serial.printf("Detected significant change: %f\n", ABS(avg - scaleWeight));
-      lastSignificantWeightChangeAt = millis();
-    }
-
-
-    if (scaleStatus == STATUS_EMPTY) {
-      if (millis() - lastTareAt > TARE_MIN_INTERVAL && ABS(tenSecAvg) > 0.2 && tenSecAvg < 3 && scaleWeight < 3) {
-        // tare if: not tared recently, more than 0.2 away from 0, less than 3 grams total (also works for negative weight)
-        lastTareAt = 0;
-      }
-
-      if (ABS(weightHistory.minSince((int64_t)millis() - 1000) - CUP_WEIGHT) < CUP_DETECTION_TOLERANCE &&
-        ABS(weightHistory.maxSince((int64_t)millis() - 1000) - CUP_WEIGHT) < CUP_DETECTION_TOLERANCE
-      ) {
-        // using average over last 500ms as empty cup weight
-        Serial.println("Starting grinding");
-        cupWeightEmpty = weightHistory.averageSince((int64_t)millis() - 500);
-        scaleStatus = STATUS_GRINDING_IN_PROGRESS;
-        startedGrindingAt = millis();
-        digitalWrite(GRINDER_ACTIVE_PIN, 1);
-        continue;
-      }
-    } else if (scaleStatus == STATUS_GRINDING_IN_PROGRESS) {
-      if (!scaleReady) {
-        digitalWrite(GRINDER_ACTIVE_PIN, 0);
-        scaleStatus = STATUS_GRINDING_FAILED;
-      }
-
-      if (millis() - startedGrindingAt > MAX_GRINDING_TIME) {
-        Serial.println("Failed because grinding took too long");
-        digitalWrite(GRINDER_ACTIVE_PIN, 0);
-        scaleStatus = STATUS_GRINDING_FAILED;
-        continue;
-      }
-
-      if (
-        millis() - startedGrindingAt > 2000 && // started grinding at least 2s ago
-        scaleWeight - weightHistory.firstValueOlderThan(millis() - 2000) < 1 // less than a gram has been grinded in the last 2 second
-      ) {
-        Serial.println("Failed because no change in weight was detected");
-        digitalWrite(GRINDER_ACTIVE_PIN, 0);
-        scaleStatus = STATUS_GRINDING_FAILED;
-        continue;
-      }
-
-      if (weightHistory.minSince((int64_t)millis() - 200) < cupWeightEmpty - CUP_DETECTION_TOLERANCE) {
-        Serial.printf("Failed because weight too low, min: %f, min value: %f\n", weightHistory.minSince((int64_t)millis() - 200), CUP_WEIGHT + CUP_DETECTION_TOLERANCE);
-        digitalWrite(GRINDER_ACTIVE_PIN, 0);
-        scaleStatus = STATUS_GRINDING_FAILED;
-        continue;
-      }
-      if (weightHistory.maxSince((int64_t)millis() - 200) >= cupWeightEmpty + COFFEE_DOSE_WEIGHT) {
-        Serial.println("Finished grinding");
-        finishedGrindingAt = millis();
-        digitalWrite(GRINDER_ACTIVE_PIN, 0);
-        scaleStatus = STATUS_GRINDING_FINISHED;
-        continue;
-      }
-    } else if (scaleStatus == STATUS_GRINDING_FINISHED) {
-      if (scaleWeight < 5) {
-        Serial.println("Going back to empty");
-        scaleStatus = STATUS_EMPTY;
-        continue;
-      }
-    } else if (scaleStatus == STATUS_GRINDING_FAILED) {
-      if (scaleWeight >= GRINDING_FAILED_WEIGHT_TO_RESET) {
-        Serial.println("Going back to empty");
-        scaleStatus = STATUS_EMPTY;
-        continue;
-      }
-    }
-
-    delay(50);
-  }
+    // Initial tare
+    tare();
 }
 
-void setupScale() {
-  loadcell.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  loadcell.set_scale(LOADCELL_SCALE_FACTOR);
+void Scale::tare() {
+    Serial.println("Taring scale");
+    loadcell.tare(config.tareMeasures);
+    state.lastTareTime = millis();
+    state.cupEmptyWeight = 0;
+}
 
-  pinMode(GRINDER_ACTIVE_PIN, OUTPUT);
-  digitalWrite(GRINDER_ACTIVE_PIN, 0);
+void Scale::updateStatus() {
+    switch (state.status) {
+    case ScaleStatus::EMPTY:
+        if (detectCup()) {
+            startGrinding();
+        } else if (shouldAutoTare()) {
+            tare();
+        }
+        break;
+        
+    case ScaleStatus::GRINDING_IN_PROGRESS:
+        checkGrindingProgress();
+        break;
+        
+    case ScaleStatus::GRINDING_FINISHED:
+    case ScaleStatus::GRINDING_FAILED:
+        if (state.currentWeight < 5.0) { // Cup removed
+            state.status = ScaleStatus::EMPTY;
+        }
+        break;
+    }
+}
 
-  xTaskCreatePinnedToCore(
-      updateScale, /* Function to implement the task */
-      "Scale", /* Name of the task */
-      10000,  /* Stack size in words */
-      NULL,  /* Task input parameter */
-      0,  /* Priority of the task */
-      &ScaleTask,  /* Task handle. */
-      1); /* Core where the task should run */
+bool Scale::detectCup() const {
+    if (!state.isReady) return false;
+    
+    double weightDiff = ABS(state.currentWeight - config.cupWeight);
+    return weightDiff < config.cupDetectionTolerance;
+}
 
+void Scale::startGrinding() {
+    state.cupEmptyWeight = state.currentWeight;
+    state.status = ScaleStatus::GRINDING_IN_PROGRESS;
+    state.grindStartTime = millis();
+    digitalWrite(pins.grinderActive, HIGH);
+    Serial.println("Starting grinding");
+}
 
-  xTaskCreatePinnedToCore(
-      scaleStatusLoop, /* Function to implement the task */
-      "ScaleStatus", /* Name of the task */
-      10000,  /* Stack size in words */
-      NULL,  /* Task input parameter */
-      0,  /* Priority of the task */
-      &ScaleStatusTask,  /* Task handle. */
-      1); /* Core where the task should run */
+void Scale::stopGrinding() {
+    digitalWrite(pins.grinderActive, LOW);
+    state.grindEndTime = millis();
+}
+
+void Scale::checkGrindingProgress() {
+    unsigned long grindingTime = millis() - state.grindStartTime;
+    
+    // Check timeout
+    if (grindingTime > config.maxGrindingTime) {
+        handleGrindingFailure("Grinding timeout");
+        return;
+    }
+    
+    // Check for cup removal
+    if (state.currentWeight < state.cupEmptyWeight - config.cupDetectionTolerance) {
+        handleGrindingFailure("Cup removed");
+        return;
+    }
+    
+    // Check progress after initial delay
+    if (grindingTime > 2000) {
+        double weightChange = state.currentWeight - state.cupEmptyWeight;
+        if (weightChange < 1.0) { // Less than 1g increase in 2 seconds
+            handleGrindingFailure("No weight increase detected");
+            return;
+        }
+    }
+    
+    // Check if target reached
+    if (state.currentWeight >= state.cupEmptyWeight + config.coffeeTargetWeight) {
+        handleGrindingCompletion();
+    }
+}
+
+void Scale::handleGrindingCompletion() {
+    stopGrinding();
+    state.status = ScaleStatus::GRINDING_FINISHED;
+    
+    if (grindingCompleteCallback) {
+        double finalWeight = state.currentWeight - state.cupEmptyWeight;
+        unsigned long grindTime = state.grindEndTime - state.grindStartTime;
+        grindingCompleteCallback(finalWeight, grindTime);
+    }
+}
+
+void Scale::handleGrindingFailure(const char* reason) {
+    stopGrinding();
+    state.status = ScaleStatus::GRINDING_FAILED;
+    
+    if (grindingFailedCallback) {
+        grindingFailedCallback(reason);
+    }
+}
+
+bool Scale::shouldAutoTare() const {
+    if (millis() - state.lastTareTime < config.tareMinInterval) {
+        return false;
+    }
+    
+    return ABS(state.currentWeight) > 0.2 && 
+           ABS(state.currentWeight) < 3.0;
+}
+
+const char* Scale::getStatusString() const {
+    switch (state.status) {
+        case ScaleStatus::EMPTY:
+            return "empty";
+        case ScaleStatus::GRINDING_IN_PROGRESS:
+            return "grinding";
+        case ScaleStatus::GRINDING_FINISHED:
+            return "finished";
+        case ScaleStatus::GRINDING_FAILED:
+            return "failed";
+        default:
+            return "unknown";
+    }
 }

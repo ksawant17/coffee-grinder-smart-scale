@@ -1,39 +1,56 @@
 #pragma once
 
 #include <SimpleKalmanFilter.h>
-#include "HX711.h"
+#include <HX711.h>
+#include <MathBuffer.h>
+#include "scale_types.hpp"
 
-#define STATUS_EMPTY 0
-#define STATUS_GRINDING_IN_PROGRESS 1
-#define STATUS_GRINDING_FINISHED 2
-#define STATUS_GRINDING_FAILED 3
+class Scale {
+  public:
+    Scale() : kalmanFilter(0.2, 0.2, 0.05), weightHistory() {}
 
-#define CUP_WEIGHT 59.2
-#define CUP_DETECTION_TOLERANCE 5 // 5 grams tolerance above or bellow cup weight to detect it
+    void begin(const PinConfig& pins, const ScaleConfig& config);
+    void IRAM_ATTR update();  // Updated with IRAM_ATTR
+    void tare();
 
-#define LOADCELL_DOUT_PIN 19
-#define LOADCELL_SCK_PIN 18
+    // Getters
+    double getCurrentWeight() const { return state.currentWeight; }
+    ScaleStatus getStatus() const { return state.status; }
+    bool isReady() const { return state.isReady; }
+    const ScaleState& getState() const { return state; }
+    const char* getStatusString() const;
+    unsigned long getLastSignificantChange() const { return state.lastSignificantChange; }
+    unsigned long getLastUpdateTime() const { return state.lastUpdateTime; }
+    double getCupEmptyWeight() const { return state.cupEmptyWeight; }
+    unsigned long getGrindStartTime() const { return state.grindStartTime; }
+    unsigned long getGrindEndTime() const { return state.grindEndTime; }
 
-#define LOADCELL_SCALE_FACTOR 449.33
+    // Event handlers
+    void onGrindingComplete(void (*callback)(double finalWeight, unsigned long grindTime)) {
+        grindingCompleteCallback = callback;
+    }
 
-#define TARE_MEASURES 20 // use the average of measure for taring
-#define SIGNIFICANT_WEIGHT_CHANGE 5 // 5 grams changes are used to detect a significant change
-#define COFFEE_DOSE_WEIGHT 13
-#define MAX_GRINDING_TIME 20000 // 20 seconds diff
-#define GRINDING_FAILED_WEIGHT_TO_RESET 500 // force on balance need to be measured to reset grinding
+    void onGrindingFailed(void (*callback)(const char* reason)) {
+        grindingFailedCallback = callback;
+    }
 
-#define GRINDER_ACTIVE_PIN 33
+  private:
+    HX711 loadcell;
+    SimpleKalmanFilter kalmanFilter;
+    ScaleState state;
+    ScaleConfig config;
+    PinConfig pins;
+    MathBuffer<double, 100> weightHistory;
 
-#define TARE_MIN_INTERVAL 10 * 1000 // auto-tare at most once every 10 seconds
+    void (*grindingCompleteCallback)(double finalWeight, unsigned long grindTime) = nullptr;
+    void (*grindingFailedCallback)(const char* reason) = nullptr;
 
-extern double scaleWeight;
-extern unsigned long scaleLastUpdatedAt;
-extern unsigned long lastSignificantWeightChangeAt;
-extern unsigned long lastTareAt;
-extern bool scaleReady;
-extern int scaleStatus;
-extern double cupWeightEmpty;
-extern unsigned long startedGrindingAt;
-extern unsigned long finishedGrindingAt;
-
-void setupScale();
+    void updateStatus();
+    bool detectCup() const;
+    void startGrinding();
+    void stopGrinding();
+    void checkGrindingProgress();
+    void handleGrindingCompletion();
+    void handleGrindingFailure(const char* reason);
+    bool shouldAutoTare() const;
+};
