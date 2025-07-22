@@ -11,8 +11,8 @@
 #define CUP_WEIGHT 59.2
 #define CUP_DETECTION_TOLERANCE 5 // 5 grams tolerance above or bellow cup weight to detect it
 
-#define LOADCELL_DOUT_PIN 19
-#define LOADCELL_SCK_PIN 18
+#define LOADCELL_DOUT_PIN 10
+#define LOADCELL_SCK_PIN 8
 
 #define LOADCELL_SCALE_FACTOR 449.33
 
@@ -22,7 +22,7 @@
 #define MAX_GRINDING_TIME 20000 // 20 seconds diff
 #define GRINDING_FAILED_WEIGHT_TO_RESET 500 // force on balance need to be measured to reset grinding
 
-#define GRINDER_ACTIVE_PIN 33
+#define GRINDER_ACTIVE_PIN 1
 
 #define TARE_MIN_INTERVAL 10 * 1000 // auto-tare at most once every 10 seconds
 
