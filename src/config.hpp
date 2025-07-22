@@ -4,9 +4,9 @@
 #define ENABLE_MQTT 0  // Set to 1 to enable MQTT functionality
 
 // WiFi Configuration
-#define WIFI_SSID "ThisIsNotTheWifiYoureLookingFor"
-#define WIFI_PASSWORD "244466666"
-#define MQTT_BROKER "192.168.1.201"
+#define WIFI_SSID "IoT"
+#define WIFI_PASSWORD "password"
+#define MQTT_BROKER "192.168.2.201"
 #define MQTT_PORT 1883
 #define MQTT_CLIENT_ID "coffee-scale"
 #define MQTT_RETRY_INTERVAL 5000  // 5 seconds between reconnection attempts

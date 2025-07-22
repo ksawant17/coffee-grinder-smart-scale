@@ -1,0 +1,90 @@
+#include <Arduino.h>
+#include <HX711.h>
+#include <EEPROM.h>
+
+// Pin definitions
+const int HX711_DOUT_PIN = 19;  // Data pin
+const int HX711_SCK_PIN = 18;   // Clock pin
+const int EEPROM_CAL_ADDRESS = 0;  // EEPROM address to store calibration
+
+// Initialize HX711
+HX711 scale;
+
+void setup() {
+    Serial.begin(115200);
+    delay(100);
+    Serial.println("\nCoffee Scale Calibration Tool");
+    Serial.println("----------------------------");
+
+    // Initialize scale
+    scale.begin(HX711_DOUT_PIN, HX711_SCK_PIN);
+    scale.set_scale();  // Initialize with default scale factor
+    scale.tare();       // Reset the scale to zero
+
+    Serial.println("\nCalibration Instructions:");
+    Serial.println("1. Remove all weight from scale");
+    Serial.println("2. Type 't' and press Enter to tare");
+    Serial.println("3. Place a known weight on the scale");
+    Serial.println("4. Enter the weight in grams (e.g., '100.0')");
+    Serial.println("5. Choose whether to save calibration");
+}
+
+void loop() {
+    static bool waitingForWeight = true;
+    
+    if (Serial.available() > 0) {
+        if (waitingForWeight) {
+            char cmd = Serial.read();
+            if (cmd == 't') {
+                Serial.println("\nTaring...");
+                scale.tare();
+                Serial.println("Tare complete!");
+                Serial.println("\nPlace known weight and enter its value in grams:");
+                waitingForWeight = false;
+            }
+        } else {
+            float knownWeight = Serial.parseFloat();
+            if (knownWeight > 0) {
+                // Get average reading
+                float reading = 0;
+                for (int i = 0; i < 10; i++) {
+                    reading += scale.get_units(10);
+                }
+                reading /= 10.0;
+                
+                // Calculate calibration factor
+                float newCalFactor = reading / knownWeight;
+                
+                Serial.print("\nNew calibration factor: ");
+                Serial.println(newCalFactor);
+                Serial.println("\nSave to EEPROM? (y/n)");
+                
+                while (!Serial.available());
+                char save = Serial.read();
+                if (save == 'y') {
+                    EEPROM.begin(512);
+                    EEPROM.put(EEPROM_CAL_ADDRESS, newCalFactor);
+                    EEPROM.commit();
+                    Serial.println("Calibration saved!");
+                    
+                    // Apply the new calibration factor
+                    scale.set_scale(newCalFactor);
+                } else {
+                    Serial.println("Calibration not saved.");
+                }
+                
+                Serial.println("\nCalibration complete!");
+                Serial.println("Current readings:");
+                waitingForWeight = true;
+            }
+        }
+    }
+
+    // Continuously show weight readings
+    if (Serial.available() <= 0) {  // Only show readings when not waiting for input
+        Serial.print("Weight: ");
+        Serial.print(scale.get_units(5), 1);
+        Serial.println(" g");
+        delay(100);
+    }
+}

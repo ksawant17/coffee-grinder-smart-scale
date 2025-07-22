@@ -37,17 +37,25 @@ void updateDisplay(void * parameter) {
     // Infinite loop for continuous display updates
     for(;;) {
         u8g2.clearBuffer();  // Clear the display buffer
-
-        // Check if display should sleep (no weight changes for 10 seconds)
-        if (millis() - scale.getLastSignificantChange() > SLEEP_AFTER_MS) {
-            u8g2.setPowerSave(1);  // Turn off display
-            delay(100);
-            continue;
-        }
-        
         u8g2.setPowerSave(0);  // Ensure display is on
 
-        // Display different screens based on scale status
+        // Get current weight
+        float currentWeight = scale.getCurrentWeight();
+        snprintf(buf, sizeof(buf), "%.1f g", currentWeight);
+        
+        // Draw weight in large font in center
+        u8g2.setFont(u8g2_font_ncenB14_tr);
+        centerPrintToScreen(buf, 35);
+
+        // Draw status line at bottom
+        u8g2.setFont(u8g2_font_7x13_tr);
+        centerPrintToScreen("Ready", 60);
+
+        // Send to display
+        u8g2.sendBuffer();
+
+        // Small delay to prevent task from consuming too much CPU
+        delay(50);
         if (scale.getLastUpdateTime() == 0) {
             // Scale not yet initialized - show startup animation
             Faces::drawStartup(u8g2, animationFrame++);

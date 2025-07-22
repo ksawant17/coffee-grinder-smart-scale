@@ -1,5 +1,12 @@
 #pragma once
 
+#include <Arduino.h>
+
+// Define DEBUG_MODE as 1 to enable debug output, or 0 to disable
+#ifndef DEBUG_MODE
+#define DEBUG_MODE 1
+#endif
+
 enum class ErrorCode {
     NONE,
     SCALE_NOT_FOUND,
