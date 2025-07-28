@@ -14,7 +14,7 @@
 #define LOADCELL_DOUT_PIN 10
 #define LOADCELL_SCK_PIN 8
 
-#define LOADCELL_SCALE_FACTOR 449.33
+#define LOADCELL_SCALE_FACTOR 1809.02
 
 #define TARE_MEASURES 20 // use the average of measure for taring
 #define SIGNIFICANT_WEIGHT_CHANGE 5 // 5 grams changes are used to detect a significant change
